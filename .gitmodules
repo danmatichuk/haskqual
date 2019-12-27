@@ -1,0 +1,3 @@
+[submodule "submodules/fast-tags"]
+	path = submodules/fast-tags
+	url = git@github.com:danmatichuk/fast-tags.git
