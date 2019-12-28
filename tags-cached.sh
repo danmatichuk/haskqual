@@ -31,14 +31,83 @@ do
     fi
 done
 
-if [[ "$TAGSUPDATED" = true || (! -e TAGS ) ]]; then
+CABALDIRS=()
+function readcabaldirs () {
+    local PACKAGE_LIST=false
+    CABALDIRS=()
+    local cabalroot=$(dirname "$1")
+    while IFS= read -r p; do
+        local LINE="$p"
+        if [[ ( "$p" =~ ^"optional-packages:"[[:space:]]*(.*) ) || ( "$p" =~ ^"packages:"[[:space:]]*(.*) )  ]]; then
+            PACKAGE_LIST=true
+            LINE="${BASH_REMATCH[1]}"
+        elif [[ "$p" =~ ^[[:space:]]+([^[:space:]]+) ]]; then
+            LINE="${BASH_REMATCH[1]}"
+        else
+            PACKAGE_LIST=false
+        fi
+
+        if [[ "$PACKAGE_LIST" = true && ( ! -z "$LINE" ) && -d "$cabalroot/$LINE" ]]; then
+            CABALDIRS+=("$cabalroot/$LINE")
+        fi
+    done < "$1"
+}
+
+if [[ "$TAGSUPDATED" = true || (! -e TAGS-global ) ]]; then
     echo "Updating collated TAGS file.."
-    rm -f TAGS
+    
+    echo > "./TAGS-new"
     for srcdir in "${USRCDIRS[@]}"
     do
-        cat "./TAGS-cache/$srcdir/TAGS" >> TAGS
+        cat "./TAGS-cache/$srcdir/TAGS" >> TAGS-new
     done
-    echo "TAGS file updated."
+    mv TAGS-new TAGS-global
+    echo "TAGS-global file updated."
+    
+    cabalprojs=()
+    while IFS=  read -r -d $'\0'; do
+       cabalprojs+=("$REPLY")
+    done < <(find . -type f -name 'cabal.project' -not -path "*/dist-newstyle/*" -not -path "*/dist/*" -print0)
+
+    for cabalproj in "${cabalprojs[@]}"
+    do
+        updateneeded=false
+        readcabaldirs "$cabalproj"
+        cabalprojroot=$(dirname "$cabalproj")
+        
+        if [[ ! -e "$cabalprojroot/TAGS" ]]; then
+            updateneeded=true
+        else
+            for srcdir in "${CABALDIRS[@]}"
+            do
+                cachedir="./TAGS-cache/$srcdir"
+                if [[ -e "$cachedir" && $(find "$cachedir" -name 'TAGS' -newer "$cabalprojroot/TAGS") ]]; then
+                    updateneeded=true
+                    echo "Found updated TAGS for $cachedir and $cabalprojroot/TAGS"
+                fi
+            done
+        fi
+        
+        if [[ $updateneeded = true ]]; then
+            echo "Updating TAGS for cabal project at: $cabalproj"
+            
+            tmptags=$(mktemp)
+            exec 3>"$tmptags"
+            
+            for srcdir in "${CABALDIRS[@]}"
+            do
+                cachedir="./TAGS-cache/$srcdir"
+                find "$cachedir" -type f -name 'TAGS' -exec \
+                     cat {} >> "$tmptags" \;
+            done
+                
+            mv "$tmptags" "$cabalprojroot/TAGS"
+        fi
+    done
+    find . -type f -name 'TAGS' | xargs touch
+    
+    echo "TAGS update finished."
+    
 else
     echo "No updates required."
 fi
