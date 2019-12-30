@@ -35,14 +35,107 @@
 
 ;; Code.
 
-(defun haskqual-parse-module-name (buffer)
+(defvar haskqual-last-tags-file nil)
+
+(defvar-local haskqual-tags-file nil)
+
+(defvar-local haskqual-file-checked nil)
+
+;; Copied from https://www.emacswiki.org/emacs/EtagsSelect
+(defun --find-tags-file (path)
+  "recursively searches each parent directory for a file named 'TAGS' and returns the
+path to that file or nil if a tags file is not found. Returns nil if the buffer is
+not visiting a file"
+  (if (buffer-file-name)
+      (catch 'found-it
+        (--find-tags-file-r path))
+    (error "buffer is not visiting a file")))
+
+(defun --find-tags-file-r (path)
+   "find the tags file from the parent directories"
+   (let* ((parent (file-name-directory path))
+          (possible-tags-file (concat parent "TAGS")))
+     (cond
+       ((file-exists-p possible-tags-file) (throw 'found-it possible-tags-file))
+       ((string= "/TAGS" possible-tags-file) (error "no tags file found"))
+       (t (--find-tags-file-r (directory-file-name parent))))))
+
+(defun haskqual-auto-update-tags-table ()
+  "Automatically update the TAGS file based on the last TAGS file visited."
+  (interactive)
+  (unless haskqual-file-checked
+    (setq haskqual-file-checked t)
+    (if haskqual-tags-file
+      (haskqual-set-tags-file haskqual-tags-file)
+      (if haskqual-last-tags-file
+          (progn
+            (if (haskqual-check-tags-current haskqual-last-tags-file)
+              (haskqual-set-tags-file haskqual-last-tags-file)
+              (haskqual-find-tags-file)))
+        (progn
+          (haskqual-find-tags-file))))))
+
+(defun with-tags-table (tags-file cont)
+  (let* ((old-tags-table-list tags-table-list)
+         (old-tags-file-name tags-file-name))
+    (progn
+      (--set-tags-file tags-file)
+      (prog1
+          (funcall cont)
+        (setq tags-table-list old-tags-table-list)
+        (setq tags-file-name old-tags-file-name)))))
+
+(defun haskqual-set-tags-file (tags-file)
+  "Switch to the given TAGS file."
+  (interactive)
+   (progn
+     (setq haskqual-tags-file tags-file)
+     (setq haskqual-last-tags-file tags-file)
+     (--set-tags-file tags-file)))
+
+(defun --set-tags-file (tags-file)
+  (progn
+    (setq tags-table-list (list tags-file))
+    (setq tags-file-name tags-file)))
+
+(defun haskqual-find-tags-file ()
+  "Switch to the nearest TAGS file if found"
+  (interactive)
+  (haskqual-next-tags-file-from (concat (buffer-file-name) "/.")))
+
+(defun haskqual-next-tags-file ()
+  (interactive)
+  (if haskqual-tags-file
+      (haskqual-next-tags-file-from haskqual-tags-file)
+    (haskqual-find-tags-file)))
+
+(defun haskqual-next-tags-file-from (tags-file)
+  "Switch to the next nearest TAGS file if found"
+  (interactive)
+  (when tags-file
+    (let* ((updir (directory-file-name (file-name-directory tags-file)))
+           (next-tags-file (ignore-errors (--find-tags-file updir))))
+      (if next-tags-file
+        (if (haskqual-check-tags-current next-tags-file)
+            (haskqual-set-tags-file next-tags-file)
+          (haskqual-next-tags-file-from next-tags-file))
+        (message "No suitable TAGS file found.")))))
+
+
+(defun haskqual-check-tags-current (tags-file)
+  "Check if the given TAGS file defines this module"
+  (with-tags-table tags-file
+    (lambda () (let* ((module-name (haskqual-parse-module-name))
+           (xrefs (when module-name (xref--get-definitions '(etags--xref-backend) module-name))))
+      (seq-some (lambda (xref) (string= (buffer-file-name (xref--buffer-of xref)) (buffer-file-name (current-buffer)))) xrefs)))))
+
+(defun haskqual-parse-module-name ()
   "Parse a haskell buffer for the module name"
   (save-excursion
-    (with-current-buffer buffer
       (beginning-of-buffer)
       (re-search-forward
        "^\\s-*module\\s-*\\([A-Za-z0-9.]*\\)" nil :no-error)
-      (match-string-no-properties 1))))
+      (match-string-no-properties 1)))
 
 (defclass haskqual-import ()
   ((name :type string :initarg :name
@@ -64,49 +157,47 @@
                              
   (make-instance 'haskqual-import :name name :requalified requalified :requalifier requalifier-string :qualified qualified-bool)))
 
-(defun haskqual-parse-imports (buffer)
+(defun haskqual-parse-imports ()
   "Parse a haskell buffer for module imports."
   (save-excursion
-    (with-current-buffer buffer
-      (beginning-of-buffer)
-      (let ((dict nil)
-            (sep "\\(?:\\s-\\|\n\\)*\\(?:--.*\n\\)?\\(?:\\s-\\|\n\\)*")
-            )
-        (while (re-search-forward
-                (concat "^import"
-                        sep
-                        "\\(qualified\\)?"
-                        sep
-                        "\\([A-Za-z0-9.]*\\)"
-                        sep
-                        (concat "\\(?:" "as" sep "\\([A-Za-z0-9.]*\\)" "\\)?")
-                        )
-                nil :no-error)
-          (push (haskqual-make-import (match-string-no-properties 2) (match-string-no-properties 3) (match-string-no-properties 1)) dict))
-        dict))))
+    (beginning-of-buffer)
+    (let ((dict nil)
+          (sep "\\(?:\\s-\\|\n\\)*\\(?:--.*\n\\)?\\(?:\\s-\\|\n\\)*")
+          )
+      (while (re-search-forward
+              (concat "^import"
+                      sep
+                      "\\(qualified\\)?"
+                      sep
+                      "\\([A-Za-z0-9.]*\\)"
+                      sep
+                      (concat "\\(?:" "as" sep "\\([A-Za-z0-9.]*\\)" "\\)?")
+                      )
+              nil :no-error)
+        (push (haskqual-make-import (match-string-no-properties 2) (match-string-no-properties 3) (match-string-no-properties 1)) dict))
+      dict)))
 
-(defun haskqual-parse-exports (buffer)
+(defun haskqual-parse-exports ()
   "Parse a haskell buffer for module exports"
   (save-excursion
-    (with-current-buffer buffer
-      (beginning-of-buffer)
-      (let ((dict nil)
-            (sep "\\(?:\\s-\\|\n\\)*\\(?:--.*\n\\)?\\(?:#.*\n\\)?\\(?:\\s-\\|\n\\)*")
-            )
-        (while (re-search-forward
-                (concat "[,(]"
-                        sep
-                        "module"
-                        sep
-                        "\\([A-Za-z0-9.]*\\)")
-                nil :no-error)
-          (push (match-string-no-properties 1) dict))
-        dict))))
+    (beginning-of-buffer)
+    (let ((dict nil)
+          (sep "\\(?:\\s-\\|\n\\)*\\(?:--.*\n\\)?\\(?:#.*\n\\)?\\(?:\\s-\\|\n\\)*")
+          )
+      (while (re-search-forward
+              (concat "[,(]"
+                      sep
+                      "module"
+                      sep
+                      "\\([A-Za-z0-9.]*\\)")
+              nil :no-error)
+        (push (match-string-no-properties 1) dict))
+      dict)))
 
-(defun haskqual-expand-qualifier (qualname buffer)
+(defun haskqual-expand-qualifier (qualname)
   "Expand local qualifiers and module exports for a qualified identifier, producing a list of possible expansions."
   (let ((quals))
-    (dolist (elt (haskqual-parse-imports buffer) quals)
+    (dolist (elt (haskqual-parse-imports) quals)
       (when (or (and qualname (string= qualname (haskqual-import-name elt))) ;; is a fully qualified module
              (or
                (and (not qualname) (not (haskqual-import-qualified elt))) ;; unqualified identifier can match any unqualified import
@@ -114,7 +205,7 @@
         (push (haskqual-import-name elt) quals)))))
         
 
-(defun haskqual-get-xref (ident buffer)
+(defun haskqual-get-xref (ident)
   "Search for an identifer by expanding it into possible fully-qualified variants"
   (when ident
     (let ((indent-xrefs (haskqual-congruent-xrefs ident)))
@@ -124,20 +215,20 @@
                (basename (if match (match-string 2 ident) ident))
                (base-xrefs (when match (haskqual-congruent-xrefs basename))))
           (if base-xrefs base-xrefs
-            (haskqual--search-qualifiers qualname basename buffer)))))))
+            (haskqual--search-qualifiers qualname basename)))))))
 
 
-(defun haskqual--search-qualifiers (qualname basename buffer)
-  (let* ((qualifiers (haskqual-expand-qualifier qualname buffer))
+(defun haskqual--search-qualifiers (qualname basename)
+  (let* ((qualifiers (haskqual-expand-qualifier qualname))
          (qualified-idents (--map (concat it "." basename) qualifiers))
-         (modulename (haskqual-parse-module-name buffer))
+         (modulename (haskqual-parse-module-name))
          (allqualifiers (if qualname qualified-idents (cons (concat modulename "." basename) qualified-idents)))
          (xref-result (xref--get-first-xref allqualifiers)))
     (if xref-result xref-result
       (let ((exports))
         (dolist (elt qualifiers exports)
           (let* ((module-xref (nth 0 (xref--get-definitions '(etags--xref-backend) elt)))
-                 (module-exports (if module-xref (haskqual-parse-exports (xref--buffer-of module-xref)) nil)))
+                 (module-exports (when module-xref (with-current-buffer (xref--buffer-of module-xref) (haskqual-parse-exports)))))
             (setq exports (append module-exports exports))))
         (let ((xrefs (xref--get-first-xref (--map (concat it "." basename) exports))))
           (if xrefs xrefs
@@ -155,12 +246,12 @@
 
 (defun haskqual-find-definition ()
   (interactive)
-  (let ((xrefs (haskqual-get-xref (haskqual-ident-at-point) (current-buffer))))
+  (let ((xrefs (haskqual-get-xref (haskqual-ident-at-point))))
     (if xrefs (xref--show-xrefs xrefs nil) (message "No definitions found."))))
 
 (defun haskqual-find-definition-other-window ()
   (interactive)
-  (let ((xrefs (haskqual-get-xref (haskqual-ident-at-point) (current-buffer))))
+  (let ((xrefs (haskqual-get-xref (haskqual-ident-at-point))))
     (if xrefs (xref--show-xrefs xrefs 'window) (message "No definitions found."))))
 
 
