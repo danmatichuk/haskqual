@@ -246,7 +246,9 @@ not visiting a file"
     (if (car xrefs)
         (let* ((buf (buffer-file-name (xref--buffer-of (car xrefs)))))
           (if (seq-every-p (lambda (elt) (string= (buffer-file-name (xref--buffer-of elt)) buf)) (cdr xrefs))
-              xrefs
+              (if (string= buf (buffer-file-name (current-buffer)))
+                  xrefs
+                (list (car xrefs)))
             nil)
           ))))
 
