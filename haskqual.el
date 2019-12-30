@@ -91,7 +91,7 @@
     (with-current-buffer buffer
       (beginning-of-buffer)
       (let ((dict nil)
-            (sep "\\(?:\\s-\\|\n\\)*\\(?:--.*\n\\)?\\(?:\\s-\\|\n\\)*")
+            (sep "\\(?:\\s-\\|\n\\)*\\(?:--.*\n\\)?\\(?:#.*\n\\)?\\(?:\\s-\\|\n\\)*")
             )
         (while (re-search-forward
                 (concat "[,(]"
@@ -115,24 +115,43 @@
         
 
 (defun haskqual-get-xref (ident buffer)
-  "Search for an identifer by first expanding it into possible fully-qualified variants"
+  "Search for an identifer by expanding it into possible fully-qualified variants"
   (when ident
-    (let* ((match (string-match "^\\(\\(?:[A-Za-z0-9.]+\\)+\\)[.]\\([A-Za-z0-9]+\\)" ident))
-         (basename (if match (match-string 2 ident) ident))
-         (qualname (if match (match-string 1 ident) nil))
-         (qualifiers (haskqual-expand-qualifier qualname buffer))
+    (let ((indent-xrefs (haskqual-congruent-xrefs ident)))
+      (if indent-xrefs indent-xrefs
+        (let* ((match (string-match "^\\(\\(?:[A-Za-z0-9.]+\\)+\\)[.]\\(\\(?:\\sw\\|\\s_\\|\\s.\\)+\\)" ident))
+               (qualname (when match (match-string 1 ident)))
+               (basename (if match (match-string 2 ident) ident))
+               (base-xrefs (when match (haskqual-congruent-xrefs basename))))
+          (if base-xrefs base-xrefs
+            (haskqual--search-qualifiers qualname basename buffer)))))))
+
+
+(defun haskqual--search-qualifiers (qualname basename buffer)
+  (let* ((qualifiers (haskqual-expand-qualifier qualname buffer))
          (qualified-idents (--map (concat it "." basename) qualifiers))
          (modulename (haskqual-parse-module-name buffer))
-         (allqualifiers (if qualname qualified-idents (cons (concat modulename "." ident) qualified-idents)))
-         (xref-result (xref--get-first-xref allqualifiers))
-         )
+         (allqualifiers (if qualname qualified-idents (cons (concat modulename "." basename) qualified-idents)))
+         (xref-result (xref--get-first-xref allqualifiers)))
     (if xref-result xref-result
       (let ((exports))
         (dolist (elt qualifiers exports)
-          (let* ((module-xref (nth 0 (xref-get-xrefs '(etags--xref-backend) elt)))
+          (let* ((module-xref (nth 0 (xref--get-definitions '(etags--xref-backend) elt)))
                  (module-exports (if module-xref (haskqual-parse-exports (xref--buffer-of module-xref)) nil)))
             (setq exports (append module-exports exports))))
-        (xref--get-first-xref (--map (concat it "." basename) exports)))))))
+        (let ((xrefs (xref--get-first-xref (--map (concat it "." basename) exports))))
+          (if xrefs xrefs
+            (xref--get-definitions '(etags--xref-backend) basename)))))))
+
+(defun haskqual-congruent-xrefs (ident)
+  "Return xrefs for the given identifier iff they all belong to the same file."
+  (let* ((xrefs (xref--get-definitions '(etags--xref-backend) ident)))
+    (if (car xrefs)
+        (let* ((buf (buffer-file-name (xref--buffer-of (car xrefs)))))
+          (if (seq-every-p (lambda (elt) (string= (buffer-file-name (xref--buffer-of elt)) buf)) (cdr xrefs))
+              xrefs
+            nil)
+          ))))
 
 (defun haskqual-find-definition ()
   (interactive)
@@ -169,7 +188,7 @@
 (defun haskqual-ident-at-point ()
   "Return the identifier under point, or nil if none found.
 May return a qualified name."
-  (let ((reg (dante-ident-pos-at-point)))
+  (let ((reg (haskqual-ident-pos-at-point)))
     (when reg
       (apply #'buffer-substring-no-properties reg))))
 
@@ -177,12 +196,12 @@ May return a qualified name."
 (defun haskqual-ident-pos-at-point (&optional offset)
   "Return the span of the (qualified) identifier at point+OFFSET, or nil if none found."
   (let* ((qualifier-regex "\\([[:upper:]][[:alnum:]]*\\.\\)")
-         (ident-regex (concat qualifier-regex "*\\(\\s.+\\|\\(\\sw\\|\\s_\\)+\\)"))) ; note * for many qualifiers
+         (ident-regex (concat qualifier-regex "*\\(\\(\\sw\\|\\s_\\|\\s.\\)+\\)"))) ; note * for many qualifiers
     (save-excursion
       (goto-char (+ (point) (or offset 0)))
       (when (looking-at ident-regex)
         (let ((end (match-end 0)))
-          (skip-syntax-backward (if (looking-at "\\s.") "." "w_")) ;; find start of operator/variable
+          (skip-syntax-backward "w_.") ;; find start of operator/variable
           (while (save-excursion
                    (and (re-search-backward (concat "\\b" qualifier-regex) (line-beginning-position) t)
                         (s-matches? (concat "^" ident-regex "$") (buffer-substring-no-properties (point) end))))
