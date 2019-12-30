@@ -44,6 +44,8 @@ function readcabaldirs () {
             LINE="${BASH_REMATCH[1]}"
         elif [[ "$p" =~ ^[[:space:]]+([^[:space:]]+) ]]; then
             LINE="${BASH_REMATCH[1]}"
+        elif [[ "$p" =~ [[:space:]]* ]]; then
+            LINE=""
         else
             PACKAGE_LIST=false
         fi
@@ -104,23 +106,21 @@ if [[ "$TAGSUPDATED" = true || (! -e TAGS-global ) ]]; then
             for srcdir in "${CABALDIRS[@]}"
             do
                 cachedir="./TAGS-cache/$srcdir"
-                echo "Checking cache dir: ./TAGS-cache/$srcdir"
                 if [[ -e "$cachedir" && $(find "$cachedir" -name 'TAGS' -newer "$cabalprojroot/TAGS") ]]; then
                     updateneeded=true
-                    echo "Found updated TAGS for $cachedir and $cabalprojroot/TAGS"
+                    break
                 fi
             done
         fi
         
         if [[ $updateneeded = true ]]; then
-            echo "Updating TAGS for cabal project at: $cabalproj"
-            
+            echo "Updating tags for: $cabalproj"
             tmptags=$(mktemp)
             exec 3>"$tmptags"
             
             for srcdir in "${CABALDIRS[@]}"
             do
-                echo "Adding: $srcdir"
+                echo "Adding cached TAGS for: $srcdir"
                 cachedir="./TAGS-cache/$srcdir"
                 find "$cachedir" -type f -name 'TAGS' -exec \
                      cat {} >> "$tmptags" \;
