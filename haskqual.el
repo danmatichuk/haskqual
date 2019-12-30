@@ -36,29 +36,32 @@
 ;; Code.
 
 (defvar haskqual-last-tags-file nil)
+(defvar haskqual-global-tags-file nil)
 
 (defvar-local haskqual-tags-file nil)
 
 (defvar-local haskqual-file-checked nil)
 
+;; Functions for tracking which TAGS file is most appropriate for the given file
+
 ;; Copied from https://www.emacswiki.org/emacs/EtagsSelect
-(defun --find-tags-file (path)
+(defun --find-tags-file (path name)
   "recursively searches each parent directory for a file named 'TAGS' and returns the
 path to that file or nil if a tags file is not found. Returns nil if the buffer is
 not visiting a file"
   (if (buffer-file-name)
       (catch 'found-it
-        (--find-tags-file-r path))
+        (--find-tags-file-r path name))
     (error "buffer is not visiting a file")))
 
-(defun --find-tags-file-r (path)
+(defun --find-tags-file-r (path name)
    "find the tags file from the parent directories"
    (let* ((parent (file-name-directory path))
-          (possible-tags-file (concat parent "TAGS")))
+          (possible-tags-file (concat parent name)))
      (cond
        ((file-exists-p possible-tags-file) (throw 'found-it possible-tags-file))
-       ((string= "/TAGS" possible-tags-file) (error "no tags file found"))
-       (t (--find-tags-file-r (directory-file-name parent))))))
+       ((string= (concat "/" name) possible-tags-file) (error "no tags file found"))
+       (t (--find-tags-file-r (directory-file-name parent) name)))))
 
 (defun haskqual-auto-update-tags-table ()
   "Automatically update the TAGS file based on the last TAGS file visited."
@@ -114,7 +117,7 @@ not visiting a file"
   (interactive)
   (when tags-file
     (let* ((updir (directory-file-name (file-name-directory tags-file)))
-           (next-tags-file (ignore-errors (--find-tags-file updir))))
+           (next-tags-file (ignore-errors (--find-tags-file updir "TAGS"))))
       (if next-tags-file
         (if (haskqual-check-tags-current next-tags-file)
             (haskqual-set-tags-file next-tags-file)
@@ -128,6 +131,9 @@ not visiting a file"
     (lambda () (let* ((module-name (haskqual-parse-module-name))
            (xrefs (when module-name (xref--get-definitions '(etags--xref-backend) module-name))))
       (seq-some (lambda (xref) (string= (buffer-file-name (xref--buffer-of xref)) (buffer-file-name (current-buffer)))) xrefs)))))
+
+
+;; Functions for resolving qualified module lookups
 
 (defun haskqual-parse-module-name ()
   "Parse a haskell buffer for the module name"
@@ -255,6 +261,8 @@ not visiting a file"
     (if xrefs (xref--show-xrefs xrefs 'window) (message "No definitions found."))))
 
 
+
+
 (defun xref--buffer-of (item)
   (let* ((marker (save-excursion
                    (xref-location-marker (xref-item-location item))))
@@ -266,7 +274,8 @@ not visiting a file"
     (let* ((input (car inputs))
            (xrefs (xref--get-definitions '(etags--xref-backend) input)))
       (if xrefs xrefs
-         (xref--get-first-xref (cdr inputs))))))
+        (xref--get-first-xref (cdr inputs))))))
+
 
 (defun xref--get-definitions (backend input)
   (let* ((xref-backend-functions backend)
@@ -300,3 +309,45 @@ May return a qualified name."
           (list (point) end))))))
 
 
+;; Functions for falling back to a global TAGS file (i.e. for manual identifier lookups)
+
+
+(defun xref-global-find-tag (tag)
+  (interactive (list (xref-global--read-identifier-tags)))
+  (xref-global--with-global-tags
+   (lambda ()
+     (let ((xrefs (xref--get-definitions '(etags--xref-backend) tag)))
+       (xref--show-xrefs xrefs nil)))))
+
+;; Try finding the global TAGS file if we can, falling back to the local one
+(defun xref-global--with-global-tags (cont)
+  (progn
+    (setq global-tags haskqual-global-tags-file)
+    (unless global-tags
+      (setq global-tags (ignore-errors (--find-tags-file (buffer-file-name) "TAGS-global"))))
+    (unless global-tags
+      (setq global-tags haskqual-tags-file))
+    (with-tags-table global-tags cont)))
+
+;; Copied from xref.el
+(defun xref--global-read-identifier (prompt)
+  "Return the identifier at point or read it from the minibuffer."
+  (let* ((backend (xref-find-backend))
+         (id (xref-backend-identifier-at-point backend)))
+    (cond ((or current-prefix-arg
+               (not id)
+               (xref--prompt-p this-command))
+           (completing-read (if id
+                                (format "%s (default %s): "
+                                        (substring prompt 0 (string-match
+                                                             "[ :]+\\'" prompt))
+                                        id)
+                              prompt)
+                            (xref-global--with-global-tags (lambda () (xref-backend-identifier-completion-table backend)))
+                            nil nil nil
+                            'xref--read-identifier-history id))
+          (t id))))
+
+(defun xref-global--read-identifier-tags ()
+  (let* ((xref-backend-functions '(etags--xref-backend)))
+    (xref--global-read-identifier "Find definitions of: ")))
