@@ -35,7 +35,8 @@ CABALDIRS=()
 function readcabaldirs () {
     local PACKAGE_LIST=false
     CABALDIRS=()
-    local cabalroot=$(dirname "$1")
+    local cabalfiles=()
+    local cabalprojroot=$(dirname "$1")
     while IFS= read -r p; do
         local LINE="$p"
         if [[ ( "$p" =~ ^"optional-packages:"[[:space:]]*(.*) ) || ( "$p" =~ ^"packages:"[[:space:]]*(.*) )  ]]; then
@@ -47,21 +48,42 @@ function readcabaldirs () {
             PACKAGE_LIST=false
         fi
 
-        if [[ "$PACKAGE_LIST" = true && ( ! -z "$LINE" ) && -d "$cabalroot/$LINE" ]]; then
-            CABALDIRS+=("$cabalroot/$LINE")
+        if [[ "$PACKAGE_LIST" = true && ( ! -z "$LINE" ) ]]; then
+            if [[ -d "$cabalprojroot/$LINE" ]]; then
+                cabalfile="$cabalprojroot/$LINE/*.cabal"
+                cabalfiles+=($cabalfile)
+            else
+                cabalfileglob="$cabalprojroot/$LINE"
+                for i in $cabalfileglob
+                do
+                    if [[ -e "$i" ]]; then
+                        cabalfiles+=("$i")
+                    fi
+                done
+            fi
         fi
     done < "$1"
+
+    for i in ${cabalfiles[@]}
+    do
+        local cabalroot=$(dirname "$i")
+        while IFS= read -r dir; do
+            CABALDIRS+=("$cabalroot/$dir")
+        done < <(sed -n -e 's/^[[:space:]]*hs-source-dirs:[[:space:]]*\(.*\)/\1/p' "$i")
+    done
 }
 
 if [[ "$TAGSUPDATED" = true || (! -e TAGS-global ) ]]; then
     echo "Updating collated TAGS file.."
     
-    echo > "./TAGS-new"
+    tmptags=$(mktemp)
+    exec 3>"$tmptags"
+
     for srcdir in "${USRCDIRS[@]}"
     do
-        cat "./TAGS-cache/$srcdir/TAGS" >> TAGS-new
+        cat "./TAGS-cache/$srcdir/TAGS" >> "$tmptags"
     done
-    mv TAGS-new TAGS-global
+    mv "$tmptags" TAGS-global
     echo "TAGS-global file updated."
     
     cabalprojs=()
@@ -71,6 +93,7 @@ if [[ "$TAGSUPDATED" = true || (! -e TAGS-global ) ]]; then
 
     for cabalproj in "${cabalprojs[@]}"
     do
+        echo "Checking $cabalproj"
         updateneeded=false
         readcabaldirs "$cabalproj"
         cabalprojroot=$(dirname "$cabalproj")
@@ -81,6 +104,7 @@ if [[ "$TAGSUPDATED" = true || (! -e TAGS-global ) ]]; then
             for srcdir in "${CABALDIRS[@]}"
             do
                 cachedir="./TAGS-cache/$srcdir"
+                echo "Checking cache dir: ./TAGS-cache/$srcdir"
                 if [[ -e "$cachedir" && $(find "$cachedir" -name 'TAGS' -newer "$cabalprojroot/TAGS") ]]; then
                     updateneeded=true
                     echo "Found updated TAGS for $cachedir and $cabalprojroot/TAGS"
@@ -96,12 +120,16 @@ if [[ "$TAGSUPDATED" = true || (! -e TAGS-global ) ]]; then
             
             for srcdir in "${CABALDIRS[@]}"
             do
+                echo "Adding: $srcdir"
                 cachedir="./TAGS-cache/$srcdir"
                 find "$cachedir" -type f -name 'TAGS' -exec \
                      cat {} >> "$tmptags" \;
             done
-                
-            mv "$tmptags" "$cabalprojroot/TAGS"
+            cabalprojroot2=${cabalprojroot:2}
+
+            sed -e ':a' -e 'N' -e '$!ba' -e 's|''\n'$cabalprojroot2'/|''\
+|g' "$tmptags" > "$cabalprojroot/TAGS"
+
         fi
     done
     find . -type f -name 'TAGS' | xargs touch
